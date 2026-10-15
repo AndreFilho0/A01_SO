@@ -11,8 +11,9 @@
  *   ./pix --sem-mutex  N     (P1) N envios SEM protecao
  *   ./pix --com-mutex  N     (P1) N envios COM mutex
  *   ./pix --demo             (P1) varre N e mede a corrida
- *   ./pix --fcfs  P N        (P2) pool de P workers + fila FCFS (em breve)
- *   ./pix                    (P3) sistema completo + debug por sinais (em breve)
+ *   ./pix --fcfs  P N        (P2) pool de P workers + fila FCFS
+ *   ./pix                    (P3) sistema completo; Ctrl+C mostra a fila
+ *   ./pix --debug P N [servico_ms] [chegada_ms] (P3) configura a demonstracao
  *
  * Compilar: gcc -O2 -o pix pix.c -pthread
  */
@@ -24,6 +25,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <stdint.h>
+#include <signal.h>
 
 /* --- base de contas (modelo N:1): N envios creditam 1 conta central --- */
 #define POOL_WORKERS    8L      /* tamanho fixo da thread pool */
@@ -262,6 +264,8 @@ static long    f_servico_ms;
 static double  t0;                      
 static int     max_fila;                
 static int     seq_saida;               
+static int     concluidas;             /* protegido por mutex_fila */
+static int     f_total;
  
 static double *t_chegada, *t_inicio, *t_fim;
 static int    *t_worker, *t_ordem;
@@ -282,6 +286,60 @@ static void fila_str(char *buf, size_t n)
                                 fila.dados[(fila.ini + k) % TAM_FILA].id);
     if (fila.qtd > 10) pos += (size_t)snprintf(buf + pos, n - pos, " ...+%d", fila.qtd - 10);
     snprintf(buf + pos, n - pos, "]");
+}
+
+/* ============ PARTE 3 - DEBUGGING POR SINAIS ============ */
+
+/* Chamado com mutex_fila: a fila e os workers pertencem ao mesmo instante. */
+static void mostrar_estado(void)
+{
+    int ocupados = 0;
+    int recebidas = seq_saida + fila.qtd;
+    for (int w = 0; w < f_pool; w++)
+        if (em_atendimento[w] != 0) ocupados++;
+
+    printf("\n=== DEBUG SIGINT [t=%.2fs] ===\n", agora_s());
+    printf("  Recebidas: %d/%d | Em atendimento: %d | Concluidas: %d\n",
+           recebidas, f_total, ocupados, concluidas);
+    printf("  Ainda nao enfileiradas: %d\n", f_total - recebidas);
+    printf("  Fila FCFS (%d aguardando): [", fila.qtd);
+    for (int k = 0; k < fila.qtd; k++) {
+        const Req *r = &fila.dados[(fila.ini + k) % TAM_FILA];
+        printf("%s#%d", k ? " -> " : "", r->id);
+    }
+    printf("]%s\n", fila.qtd == 0 ? " (vazia)" : "");
+    for (int w = 0; w < f_pool; w++) {
+        if (em_atendimento[w] != 0)
+            printf("  worker %d: atendendo PIX #%d\n", w + 1, em_atendimento[w]);
+        else
+            printf("  worker %d: livre\n", w + 1);
+    }
+    printf("=== FIM DEBUG: simulacao continua ===\n\n");
+    fflush(stdout);
+}
+
+/* sigwait recebe o sinal em uma thread normal, onde printf e mutex sao seguros.
+ * Nao ha handler assincrono acessando a fila. SIGUSR1 so acorda esta thread
+ * internamente, quando todas as transferencias terminam. */
+static void *debug_sinais(void *arg)
+{
+    (void)arg;
+    sigset_t sinais;
+    sigemptyset(&sinais);
+    sigaddset(&sinais, SIGINT);
+    sigaddset(&sinais, SIGUSR1);
+    for (;;) {
+        int sinal;
+        int erro = sigwait(&sinais, &sinal);
+        if (erro != 0) {
+            fprintf(stderr, "Falha ao aguardar sinal: %s\n", strerror(erro));
+            return NULL;
+        }
+        if (sinal == SIGUSR1) return NULL;
+        pthread_mutex_lock(&mutex_fila);
+        mostrar_estado();
+        pthread_mutex_unlock(&mutex_fila);
+    }
 }
  
 /* PRODUTOR: coloca a requisicao no FIM da fila (dorme se cheia) */
@@ -316,6 +374,7 @@ static Req retirar(int w)
     r = fila.dados[fila.ini];
     fila.ini = (fila.ini + 1) % TAM_FILA;
     fila.qtd--;
+    em_atendimento[w - 1] = r.id;
     t_ordem[r.id - 1]  = ++seq_saida;
     t_inicio[r.id - 1] = agora_s();
     t_worker[r.id - 1] = w;
@@ -347,28 +406,32 @@ static void *worker_fcfs(void *arg)
         Req r = retirar(w);                      
         if (r.id == 0) break;                    
  
-        em_atendimento[w - 1] = r.id;
         usleep((useconds_t)f_servico_ms * 1000); 
         transferir_fcfs(&r);
+        pthread_mutex_lock(&mutex_fila);
         t_fim[r.id - 1] = agora_s();
         em_atendimento[w - 1] = 0;
+        concluidas++;
  
         printf("[t=%6.2fs] worker %d concluiu PIX #%d\n", t_fim[r.id - 1], w, r.id);
+        pthread_mutex_unlock(&mutex_fila);
     }
     return NULL;
 }
  
 /* --fcfs P N [servico_ms] [chegada_ms] */
-static int modo_fcfs(int P, int N, long servico_ms, long chegada_ms)
+static int modo_fcfs(int P, int N, long servico_ms, long chegada_ms, int debug)
 {
-    if (P < 1 || P > MAX_POOL || N < 1) {
-        fprintf(stderr, "Parametros invalidos (1 <= P <= %d, N >= 1).\n", MAX_POOL);
+    if (P < 1 || P > MAX_POOL || N < 1 || servico_ms < 0 || chegada_ms < 0) {
+        fprintf(stderr, "Parametros invalidos (1 <= P <= %d, N >= 1, tempos >= 0).\n", MAX_POOL);
         return 1;
     }
     f_pool = P;
+    f_total = N;
     f_servico_ms = servico_ms;
  
-    printf("\n=== PARTE 2: thread pool de %d workers + fila FCFS ===\n", P);
+    printf("\n=== %s: thread pool de %d workers + fila FCFS ===\n",
+           debug ? "PARTE 3 (debug por sinais)" : "PARTE 2", P);
     printf("  %d requisicoes (N:1 -> conta central) | servico=%ldms | chegada a cada %ldms | fila max=%d\n\n",
            N, servico_ms, chegada_ms, TAM_FILA);
  
@@ -376,16 +439,46 @@ static int modo_fcfs(int P, int N, long servico_ms, long chegada_ms)
     saldo_central = 0;
     for (int i = 0; i < NUM_USUARIOS; i++) usuarios[i] = SALDO_INICIAL;
     fila.ini = fila.fim = fila.qtd = 0;
-    max_fila = 0; seq_saida = 0; encerrar = 0;
+    max_fila = 0; seq_saida = 0; encerrar = 0; concluidas = 0;
     t_chegada = calloc((size_t)N, sizeof(double));
     t_inicio  = calloc((size_t)N, sizeof(double));
     t_fim     = calloc((size_t)N, sizeof(double));
     t_worker  = calloc((size_t)N, sizeof(int));
     t_ordem   = calloc((size_t)N, sizeof(int));
     em_atendimento = calloc((size_t)P, sizeof(int));
- 
- 
+
+    if (!t_chegada || !t_inicio || !t_fim || !t_worker || !t_ordem || !em_atendimento) {
+        fprintf(stderr, "Memoria insuficiente para a simulacao.\n");
+        free(t_chegada); free(t_inicio); free(t_fim);
+        free(t_worker); free(t_ordem); free(em_atendimento);
+        return 1;
+    }
+
     t0 = 0; t0 = agora_s();
+
+    pthread_t thread_debug;
+    if (debug) {
+        sigset_t sinais, anteriores;
+        sigemptyset(&sinais);
+        sigaddset(&sinais, SIGINT);
+        sigaddset(&sinais, SIGUSR1);
+        /* Antes de criar qualquer thread: todas herdam os sinais bloqueados.
+         * Assim Ctrl+C chega ao sigwait, sem encerrar um worker por acidente. */
+        int erro = pthread_sigmask(SIG_BLOCK, &sinais, &anteriores);
+        if (erro == 0) {
+            erro = pthread_create(&thread_debug, NULL, debug_sinais, NULL);
+            if (erro != 0) pthread_sigmask(SIG_SETMASK, &anteriores, NULL);
+        }
+        if (erro != 0) {
+            fprintf(stderr, "Falha ao iniciar debugging: %s\n", strerror(erro));
+            free(t_chegada); free(t_inicio); free(t_fim);
+            free(t_worker); free(t_ordem); free(em_atendimento);
+            return 1;
+        }
+        printf("  Pressione Ctrl+C para mostrar a fila e continuar.\n");
+        printf("  A simulacao termina automaticamente apos os %d PIX.\n\n", N);
+        fflush(stdout);
+    }
  
     // cria a thread pool (tamanho fixo P)
     pthread_t tids[MAX_POOL];
@@ -405,6 +498,13 @@ static int modo_fcfs(int P, int N, long servico_ms, long chegada_ms)
     pthread_cond_broadcast(&nao_vazia);                
     pthread_mutex_unlock(&mutex_fila);
     for (int w = 0; w < P; w++) pthread_join(tids[w], NULL);  
+
+    if (debug) {
+        pthread_kill(thread_debug, SIGUSR1);
+        pthread_join(thread_debug, NULL);
+        /* Mantem os sinais bloqueados ate o processo sair, inclusive durante
+         * o relatorio final e a liberacao das estruturas compartilhadas. */
+    }
  
     /* ---------- relatorio do escalonamento ---------- */
     double soma_espera = 0, max_espera = 0;
@@ -454,14 +554,26 @@ static void uso(const char *prog)
     printf("  %s --sem-mutex  N     (P1) N envios SEM protecao\n", prog);
     printf("  %s --com-mutex  N     (P1) N envios COM mutex\n", prog);
     printf("  %s --demo             (P1) varre N e mede a corrida\n", prog);
-     printf("  %s --fcfs P N [servico_ms=200] [chegada_ms=50]\n", prog);
+    printf("  %s --fcfs P N [servico_ms=200] [chegada_ms=50]\n", prog);
     printf("                        (P2) pool de P workers + fila FCFS\n");
-    printf("  %s                    (P3) sistema completo + debug por sinais (em breve)\n", prog);
+    printf("  %s                    (P3) pool=3, PIX=12, servico=3000ms, chegada=100ms\n", prog);
+    printf("  %s --debug [P N [servico_ms=3000] [chegada_ms=100]]\n", prog);
+    printf("                        (P3) Ctrl+C mostra a fila sem encerrar\n");
 }
 
 int main(int argc, char **argv)
 {
     srand((unsigned)time(NULL));
+    /* Mantem as mensagens visiveis tambem ao redirecionar a saida. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
+    if (argc == 1 || (argc == 2 && strcmp(argv[1], "--debug") == 0))
+        return modo_fcfs(3, 12, 3000, 100, 1);
+    if (argc >= 4 && argc <= 6 && strcmp(argv[1], "--debug") == 0) {
+        long servico = argc > 4 ? atol(argv[4]) : 3000;
+        long chegada = argc > 5 ? atol(argv[5]) : 100;
+        return modo_fcfs(atoi(argv[2]), atoi(argv[3]), servico, chegada, 1);
+    }
 
     if (argc >= 2 && strcmp(argv[1], "--passo-a-passo") == 0) { modo_passo_a_passo(); return 0; }
     if (argc >= 2 && strcmp(argv[1], "--demo") == 0)          { modo_demo();          return 0; }
@@ -470,8 +582,8 @@ int main(int argc, char **argv)
     if (argc >= 4 && strcmp(argv[1], "--fcfs") == 0) {
         long servico = argc > 4 ? atol(argv[4]) : 200;
         long chegada = argc > 5 ? atol(argv[5]) : 50;
-        return modo_fcfs(atoi(argv[2]), atoi(argv[3]), servico, chegada);
+        return modo_fcfs(atoi(argv[2]), atoi(argv[3]), servico, chegada, 0);
     }
     uso(argv[0]);
-    return 0;
+    return 1;
 }

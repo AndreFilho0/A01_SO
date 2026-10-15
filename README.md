@@ -61,13 +61,29 @@ make            # ou: gcc -O2 -o pix pix.c -pthread
 ./pix --demo               # varre N e mostra a partir de quando o erro aparece
 
 # Parte 2 — escalonador FCFS
-./pix --fcfs 3 10          # pool de 3 workers, 10 requisições (7 esperam na fila)
+./pix --fcfs 3 10          # pool de 3 workers, 10 requisições
 
 # Parte 3 — debugging por sinais
 ./pix                      # sistema completo; pressione Ctrl+C para ver a fila
+./pix --debug 3 12 3000 100 # configura pool, quantidade, serviço e intervalo (ms)
 ```
 
 > Requisitos: `gcc`/`clang` com suporte a POSIX threads (Linux ou macOS).
+
+Na parte 3, `./pix` usa 3 workers e 12 requisições, com 3 segundos de atendimento
+por requisição e chegadas a cada 100 ms. Durante a execução, **Ctrl+C mostra a
+fila FCFS completa, os PIX em atendimento e a quantidade de concluídos**.
+Pode pressionar mais de uma vez para acompanhar as mudanças. A simulação continua
+e termina automaticamente depois de atender todas as requisições.
+
+O terminal envia `SIGINT` ao pressionar Ctrl+C. Esse sinal é bloqueado antes da
+criação das threads e recebido por uma thread dedicada com `sigwait`. A consulta
+usa o mesmo mutex da fila para obter um estado consistente, sem executar `printf`
+ou bloquear mutex dentro de um handler assíncrono. `SIGUSR1` é usado internamente
+para encerrar a thread de debugging ao final. Nos modos da parte 1 e `--fcfs`,
+Ctrl+C mantém seu comportamento normal de interrupção.
+
+Veja [a explicação e a demonstração da parte 3](docs/parte3_debug_sinais.md).
 
 ---
 
@@ -95,6 +111,6 @@ A01_SO/
   (`--demo`) mostra a partir de que valores de **N** o problema se torna evidente.
 - **(3.0) Proteção mínima — FCFS:** a thread pool passa a ter tamanho fixo; as
   requisições excedentes são organizadas numa fila **First-Come, First-Served**.
-- **(2.0) Debugging por sinais:** um handler de sinal (tecla Ctrl+C) solicita o
-  *dump* do estado atual da fila de requisições, com tempos de execução simulados
-  para facilitar a verificação.
+- **(2.0) Debugging por sinais:** uma thread recebe `SIGINT` (tecla Ctrl+C) com
+  `sigwait` e mostra o estado atual da fila de requisições, com tempos de execução
+  simulados para facilitar a verificação.
