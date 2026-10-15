@@ -76,6 +76,11 @@ fila FCFS completa, os PIX em atendimento e a quantidade de concluídos**.
 Pode pressionar mais de uma vez para acompanhar as mudanças. A simulação continua
 e termina automaticamente depois de atender todas as requisições.
 
+A saída usa eventos alinhados por tempo, cores para cada etapa e um painel de
+consulta com progresso, fila completa e atendimento dos workers. As cores são
+ativadas em terminais compatíveis e desativadas ao salvar a saída em arquivo.
+Para desativá-las manualmente, execute `NO_COLOR=1 ./pix`.
+
 O terminal envia `SIGINT` ao pressionar Ctrl+C. Esse sinal é bloqueado antes da
 criação das threads e recebido por uma thread dedicada com `sigwait`. A consulta
 usa o mesmo mutex da fila para obter um estado consistente, sem executar `printf`

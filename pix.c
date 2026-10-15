@@ -27,6 +27,35 @@
 #include <stdint.h>
 #include <signal.h>
 
+/* Cores somente em terminais; NO_COLOR permite desativar manualmente. */
+static int cores_terminal;
+#define C_RESET  "\033[0m"
+#define C_TITULO "\033[1;36m"
+#define C_SUAVE  "\033[90m"
+#define C_FILA   "\033[33m"
+#define C_ATIVO  "\033[36m"
+#define C_OK     "\033[32m"
+#define C_ERRO   "\033[31m"
+#define PAINEL_TEXTO 72
+
+static const char *cor(const char *codigo)
+{
+    return cores_terminal ? codigo : "";
+}
+
+static void painel_borda(void)
+{
+    printf("%s+", cor(C_SUAVE));
+    for (int i = 0; i < PAINEL_TEXTO + 2; i++) putchar('-');
+    printf("+%s\n", cor(C_RESET));
+}
+
+static void painel_linha(const char *codigo, const char *texto)
+{
+    printf("%s|%s %s%-*s%s %s|%s\n", cor(C_SUAVE), cor(C_RESET),
+           cor(codigo), PAINEL_TEXTO, texto, cor(C_RESET), cor(C_SUAVE), cor(C_RESET));
+}
+
 /* --- base de contas (modelo N:1): N envios creditam 1 conta central --- */
 #define POOL_WORKERS    8L      /* tamanho fixo da thread pool */
 #define SALDO_INICIAL  1000000L /* saldo inicial de cada conta de origem */
@@ -278,14 +307,12 @@ static double agora_s(void)
     return ts.tv_sec + ts.tv_nsec / 1e9 - t0;
 }
  
-static void fila_str(char *buf, size_t n)
+/* As mensagens de eventos ficam alinhadas e usam a mesma protecao da fila. */
+static void evento_fcfs(double tempo, const char *tipo, const char *codigo,
+                        const char *detalhe)
 {
-    size_t pos = (size_t)snprintf(buf, n, "[");
-    for (int k = 0; k < fila.qtd && k < 10; k++)
-        pos += (size_t)snprintf(buf + pos, n - pos, "%s#%d", k ? " " : "",
-                                fila.dados[(fila.ini + k) % TAM_FILA].id);
-    if (fila.qtd > 10) pos += (size_t)snprintf(buf + pos, n - pos, " ...+%d", fila.qtd - 10);
-    snprintf(buf + pos, n - pos, "]");
+    printf("%s  %6.2fs  %s%-10s%s %-46s %4d\n", cor(C_SUAVE), tempo,
+           cor(codigo), tipo, cor(C_RESET), detalhe, fila.qtd);
 }
 
 /* ============ PARTE 3 - DEBUGGING POR SINAIS ============ */
@@ -293,28 +320,63 @@ static void fila_str(char *buf, size_t n)
 /* Chamado com mutex_fila: a fila e os workers pertencem ao mesmo instante. */
 static void mostrar_estado(void)
 {
+    char texto[192];
     int ocupados = 0;
     int recebidas = seq_saida + fila.qtd;
     for (int w = 0; w < f_pool; w++)
         if (em_atendimento[w] != 0) ocupados++;
 
-    printf("\n=== DEBUG SIGINT [t=%.2fs] ===\n", agora_s());
-    printf("  Recebidas: %d/%d | Em atendimento: %d | Concluidas: %d\n",
+    putchar('\n');
+    painel_borda();
+    snprintf(texto, sizeof texto, "=== DEBUG SIGINT [t=%.2fs] ===", agora_s());
+    painel_linha(C_TITULO, texto);
+    painel_linha(C_SUAVE, "Estado atual | FCFS: primeiro a chegar, primeiro a sair");
+    painel_borda();
+    snprintf(texto, sizeof texto, "Recebidas: %d/%d | Em atendimento: %d | Concluidas: %d",
            recebidas, f_total, ocupados, concluidas);
-    printf("  Ainda nao enfileiradas: %d\n", f_total - recebidas);
-    printf("  Fila FCFS (%d aguardando): [", fila.qtd);
+    painel_linha(C_RESET, texto);
+    snprintf(texto, sizeof texto, "Ainda nao enfileiradas: %d", f_total - recebidas);
+    painel_linha(C_SUAVE, texto);
+    char barra[21];
+    int preenchidos = (int)(20LL * concluidas / f_total);
+    for (int i = 0; i < 20; i++) barra[i] = i < preenchidos ? '=' : '.';
+    barra[20] = '\0';
+    snprintf(texto, sizeof texto, "Progresso [%s] %5.1f%%", barra, 100.0 * concluidas / f_total);
+    painel_linha(C_OK, texto);
+    painel_borda();
+
+    /* Quebra a fila em linhas, mantendo visiveis todas as 64 entradas. */
+    char linha[PAINEL_TEXTO + 1];
+    size_t pos = (size_t)snprintf(linha, sizeof linha, "Fila FCFS (%d aguardando): [", fila.qtd);
     for (int k = 0; k < fila.qtd; k++) {
         const Req *r = &fila.dados[(fila.ini + k) % TAM_FILA];
-        printf("%s#%d", k ? " -> " : "", r->id);
+        char item[24];
+        int n = snprintf(item, sizeof item, "%s#%d", k ? " -> " : "", r->id);
+        if (pos + (size_t)n + 1 > PAINEL_TEXTO) {
+            painel_linha(C_FILA, linha);
+            pos = (size_t)snprintf(linha, sizeof linha, "  ");
+        }
+        pos += (size_t)snprintf(linha + pos, sizeof linha - pos, "%s", item);
     }
-    printf("]%s\n", fila.qtd == 0 ? " (vazia)" : "");
+    snprintf(linha + pos, sizeof linha - pos, "]%s", fila.qtd == 0 ? " (vazia)" : "");
+    painel_linha(fila.qtd ? C_FILA : C_SUAVE, linha);
+    painel_borda();
+    painel_linha(C_TITULO, "THREAD POOL / ATENDIMENTO");
     for (int w = 0; w < f_pool; w++) {
-        if (em_atendimento[w] != 0)
-            printf("  worker %d: atendendo PIX #%d\n", w + 1, em_atendimento[w]);
-        else
-            printf("  worker %d: livre\n", w + 1);
+        if (em_atendimento[w] != 0) {
+            int id = em_atendimento[w];
+            snprintf(texto, sizeof texto, "worker %d: atendendo PIX #%d | tempo: %.2fs",
+                     w + 1, id, agora_s() - t_inicio[id - 1]);
+        } else {
+            snprintf(texto, sizeof texto, "worker %d: livre", w + 1);
+        }
+        painel_linha(em_atendimento[w] ? C_ATIVO : C_SUAVE, texto);
     }
-    printf("=== FIM DEBUG: simulacao continua ===\n\n");
+    painel_borda();
+    painel_linha(C_OK, "=== FIM DEBUG: simulacao continua ===");
+    painel_linha(C_SUAVE, "Ctrl+C: nova consulta | encerramento automatico ao concluir todos os PIX");
+    painel_borda();
+    putchar('\n');
     fflush(stdout);
 }
 
@@ -345,7 +407,7 @@ static void *debug_sinais(void *arg)
 /* PRODUTOR: coloca a requisicao no FIM da fila (dorme se cheia) */
 static void enfileirar(Req r)
 {
-    char s[160];
+    char detalhe[160];
     pthread_mutex_lock(&mutex_fila);
     while (fila.qtd == TAM_FILA)
         pthread_cond_wait(&nao_cheia, &mutex_fila);
@@ -353,8 +415,8 @@ static void enfileirar(Req r)
     fila.fim = (fila.fim + 1) % TAM_FILA;
     fila.qtd++;
     if (fila.qtd > max_fila) max_fila = fila.qtd;
-    fila_str(s, sizeof s);
-    printf("[t=%6.2fs] PIX #%-3d chegou                       fila: %s\n", agora_s(), r.id, s);
+    snprintf(detalhe, sizeof detalhe, "PIX #%d chegou", r.id);
+    evento_fcfs(agora_s(), "ENTRADA", C_FILA, detalhe);
     pthread_cond_signal(&nao_vazia);         
     pthread_mutex_unlock(&mutex_fila);
 }
@@ -362,7 +424,7 @@ static void enfileirar(Req r)
 /* CONSUMIDOR: retira da CABECA da fila; devolve id=0 se acabou o expediente */
 static Req retirar(int w)
 {
-    char s[160];
+    char detalhe[160];
     Req r = { 0, 0, 0 };
     pthread_mutex_lock(&mutex_fila);
     while (fila.qtd == 0 && !encerrar)
@@ -378,9 +440,9 @@ static Req retirar(int w)
     t_ordem[r.id - 1]  = ++seq_saida;
     t_inicio[r.id - 1] = agora_s();
     t_worker[r.id - 1] = w;
-    fila_str(s, sizeof s);
-    printf("[t=%6.2fs] worker %d iniciou PIX #%-3d (esperou %.2fs)  fila: %s\n",
-           t_inicio[r.id - 1], w, r.id, t_inicio[r.id - 1] - t_chegada[r.id - 1], s);
+    snprintf(detalhe, sizeof detalhe, "worker %d iniciou PIX #%d (espera %.2fs)",
+             w, r.id, t_inicio[r.id - 1] - t_chegada[r.id - 1]);
+    evento_fcfs(t_inicio[r.id - 1], "INICIO", C_ATIVO, detalhe);
     pthread_cond_signal(&nao_cheia);
     pthread_mutex_unlock(&mutex_fila);
     return r;
@@ -413,7 +475,9 @@ static void *worker_fcfs(void *arg)
         em_atendimento[w - 1] = 0;
         concluidas++;
  
-        printf("[t=%6.2fs] worker %d concluiu PIX #%d\n", t_fim[r.id - 1], w, r.id);
+        char detalhe[160];
+        snprintf(detalhe, sizeof detalhe, "worker %d concluiu PIX #%d", w, r.id);
+        evento_fcfs(t_fim[r.id - 1], "CONCLUIDO", C_OK, detalhe);
         pthread_mutex_unlock(&mutex_fila);
     }
     return NULL;
@@ -430,10 +494,18 @@ static int modo_fcfs(int P, int N, long servico_ms, long chegada_ms, int debug)
     f_total = N;
     f_servico_ms = servico_ms;
  
-    printf("\n=== %s: thread pool de %d workers + fila FCFS ===\n",
-           debug ? "PARTE 3 (debug por sinais)" : "PARTE 2", P);
-    printf("  %d requisicoes (N:1 -> conta central) | servico=%ldms | chegada a cada %ldms | fila max=%d\n\n",
-           N, servico_ms, chegada_ms, TAM_FILA);
+    char texto[192];
+    putchar('\n');
+    painel_borda();
+    painel_linha(C_TITULO, "PIX  /  SIMULADOR DE TRANSFERENCIAS");
+    painel_linha(C_SUAVE, debug ? "PARTE 3  |  Debugging por sinais + fila FCFS"
+                                       : "PARTE 2  |  Thread pool + fila FCFS");
+    painel_borda();
+    snprintf(texto, sizeof texto, "POOL %d workers   |   PIX %d requisicoes   |   FILA ate %d entradas", P, N, TAM_FILA);
+    painel_linha(C_RESET, texto);
+    snprintf(texto, sizeof texto, "Atendimento: %ld ms   |   Intervalo de chegada: %ld ms", servico_ms, chegada_ms);
+    painel_linha(C_RESET, texto);
+    painel_borda();
  
     // estado inicial
     saldo_central = 0;
@@ -475,10 +547,16 @@ static int modo_fcfs(int P, int N, long servico_ms, long chegada_ms, int debug)
             free(t_worker); free(t_ordem); free(em_atendimento);
             return 1;
         }
-        printf("  Pressione Ctrl+C para mostrar a fila e continuar.\n");
-        printf("  A simulacao termina automaticamente apos os %d PIX.\n\n", N);
+        printf("\n%s  Ctrl+C%s  consultar fila e workers | a simulacao continua\n",
+               cor(C_TITULO), cor(C_RESET));
+        printf("%s  Encerramento automatico apos concluir os %d PIX.%s\n", cor(C_SUAVE), N, cor(C_RESET));
         fflush(stdout);
     }
+
+    printf("\n%s  %-8s %-10s %-46s %4s%s\n", cor(C_SUAVE),
+           "TEMPO", "EVENTO", "ATIVIDADE", "FILA", cor(C_RESET));
+    printf("%s  -----------------------------------------------------------------------%s\n",
+           cor(C_SUAVE), cor(C_RESET));
  
     // cria a thread pool (tamanho fixo P)
     pthread_t tids[MAX_POOL];
@@ -516,17 +594,26 @@ static int modo_fcfs(int P, int N, long servico_ms, long chegada_ms, int debug)
         if (t_ordem[i] != i + 1) fcfs_ok = 0;
     }
  
+    putchar('\n');
+    painel_borda();
+    painel_linha(C_TITULO, "RELATORIO FINAL  /  ESCALONAMENTO E INTEGRIDADE");
+    painel_borda();
     if (N <= 40) {
-        printf("\n  PIX | chegada | inicio |   fim  | espera | worker | ordem de saida da fila\n");
+        printf("\n%s  PIX | chegada | inicio |   fim  | espera | worker | ordem de saida da fila%s\n",
+               cor(C_SUAVE), cor(C_RESET));
         printf("  ----+---------+--------+--------+--------+--------+-----------------------\n");
         for (int i = 0; i < N; i++)
             printf("  #%-2d | %7.2f | %6.2f | %6.2f | %6.2f | %6d | %d\n", i + 1, t_chegada[i],
                    t_inicio[i], t_fim[i], t_inicio[i] - t_chegada[i], t_worker[i], t_ordem[i]);
     }
-    printf("\n  Espera media na fila: %.2fs | espera maxima: %.2fs | fila maxima: %d\n",
+    putchar('\n');
+    painel_borda();
+    snprintf(texto, sizeof texto, "Espera media: %.2fs | espera maxima: %.2fs | fila maxima: %d",
            soma_espera / N, max_espera, max_fila);
-    printf("  Ordem de atendimento == ordem de chegada (FCFS)? %s\n",
+    painel_linha(C_RESET, texto);
+    snprintf(texto, sizeof texto, "Ordem de atendimento == ordem de chegada (FCFS)? %s",
            fcfs_ok ? "SIM" : "NAO");
+    painel_linha(fcfs_ok ? C_OK : C_ERRO, texto);
  
     /* ---------- conferencia da protecao ---------- */
     long soma_usuarios = 0;
@@ -534,11 +621,17 @@ static int modo_fcfs(int P, int N, long servico_ms, long chegada_ms, int debug)
     long esperado = (long)N * VALOR_ENVIO;
     long total_antes = (long)NUM_USUARIOS * SALDO_INICIAL;
     long total_depois = saldo_central + soma_usuarios;
-    printf("  Saldo central ESPERADO: %ld | OBTIDO: %ld | total antes: %ld | depois: %ld\n",
-           esperado, saldo_central, total_antes, total_depois);
-    printf(saldo_central == esperado && total_antes == total_depois
-           ? "  => OK: nenhuma atualizacao perdida, total conservado.\n"
-           : "  => ERRO: inconsistencia detectada!\n");
+    snprintf(texto, sizeof texto, "Saldo central ESPERADO: %ld | OBTIDO: %ld", esperado, saldo_central);
+    painel_linha(C_RESET, texto);
+    snprintf(texto, sizeof texto, "total antes: %ld | depois: %ld", total_antes, total_depois);
+    painel_linha(C_RESET, texto);
+    painel_borda();
+    int saldo_ok = saldo_central == esperado && total_antes == total_depois;
+    painel_linha(saldo_ok ? C_OK : C_ERRO, saldo_ok
+           ? "OK: nenhuma atualizacao perdida, total conservado."
+           : "ERRO: inconsistencia detectada!");
+    painel_borda();
+    putchar('\n');
  
     free(t_chegada); free(t_inicio); free(t_fim);
     free(t_worker); free(t_ordem); free(em_atendimento);
@@ -564,6 +657,9 @@ static void uso(const char *prog)
 int main(int argc, char **argv)
 {
     srand((unsigned)time(NULL));
+    const char *term = getenv("TERM");
+    cores_terminal = isatty(STDOUT_FILENO) && !getenv("NO_COLOR")
+                  && term && strcmp(term, "dumb") != 0;
     /* Mantem as mensagens visiveis tambem ao redirecionar a saida. */
     setvbuf(stdout, NULL, _IOLBF, 0);
 
