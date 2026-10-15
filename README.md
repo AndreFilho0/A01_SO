@@ -29,7 +29,7 @@ Os vídeos das três partes serão disponibilizados na mesma pasta do Google Dri
 
 | Parte | Responsável pela gravação | Link |
 |-------|---------------------------|------|
-| Parte 1 — Sincronismo (5.0 pts) | André de Oliveira Machado Filho | [Pasta dos vídeos](https://drive.google.com/drive/folders/1WV_QEWTirhLf5BPLZhgmL7PTXy9ZVEdt?usp=sharing) |
+| Parte 1 — Sincronismo (5.0 pts) | André de Oliveira Machado Filho | [Pasta dos vídeos](https://drive.google.com/file/d/1iwzO55y1EbZ8jLVph-NnZCYLJuOUvnaD/view?usp=sharing) |
 | Parte 2 — Escalonador FCFS (3.0 pts) | Jamilly Vitorya da Silva Barbosa | [Pasta dos vídeos](https://drive.google.com/drive/folders/1WV_QEWTirhLf5BPLZhgmL7PTXy9ZVEdt?usp=sharing) |
 | Parte 3 — Debugging por sinais (2.0 pts) | Alan Queiroz Dantas de Oliveira | [Pasta dos vídeos](https://drive.google.com/drive/folders/1WV_QEWTirhLf5BPLZhgmL7PTXy9ZVEdt?usp=sharing) |
 
