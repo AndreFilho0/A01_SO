@@ -233,6 +233,218 @@ static void modo_passo_a_passo(void)
            saldo_central == 2 ? "correto: nada se perdeu." : "ERRO inesperado.");
 }
 
+/* ============ PARTE 2 - THREAD POOL FIXA + FILA FCFS ============ */
+ 
+#define TAM_FILA      64  
+#define NUM_USUARIOS  16  
+#define MAX_POOL      64
+ 
+typedef struct {
+    int  id;       
+    int  origem;   
+    long valor;
+} Req;
+ 
+typedef struct {
+    Req dados[TAM_FILA];
+    int ini, fim, qtd;
+} Fila;
+ 
+static Fila fila;                       
+static pthread_mutex_t mutex_fila = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  nao_vazia = PTHREAD_COND_INITIALIZER; 
+static pthread_cond_t  nao_cheia = PTHREAD_COND_INITIALIZER;  
+static int encerrar = 0;                                      
+ 
+static long    usuarios[NUM_USUARIOS];  
+static int     f_pool;                  
+static long    f_servico_ms;            
+static double  t0;                      
+static int     max_fila;                
+static int     seq_saida;               
+ 
+static double *t_chegada, *t_inicio, *t_fim;
+static int    *t_worker, *t_ordem;
+static int    *em_atendimento;
+ 
+static double agora_s(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9 - t0;
+}
+ 
+static void fila_str(char *buf, size_t n)
+{
+    size_t pos = (size_t)snprintf(buf, n, "[");
+    for (int k = 0; k < fila.qtd && k < 10; k++)
+        pos += (size_t)snprintf(buf + pos, n - pos, "%s#%d", k ? " " : "",
+                                fila.dados[(fila.ini + k) % TAM_FILA].id);
+    if (fila.qtd > 10) pos += (size_t)snprintf(buf + pos, n - pos, " ...+%d", fila.qtd - 10);
+    snprintf(buf + pos, n - pos, "]");
+}
+ 
+/* PRODUTOR: coloca a requisicao no FIM da fila (dorme se cheia) */
+static void enfileirar(Req r)
+{
+    char s[160];
+    pthread_mutex_lock(&mutex_fila);
+    while (fila.qtd == TAM_FILA)
+        pthread_cond_wait(&nao_cheia, &mutex_fila);
+    fila.dados[fila.fim] = r;
+    fila.fim = (fila.fim + 1) % TAM_FILA;
+    fila.qtd++;
+    if (fila.qtd > max_fila) max_fila = fila.qtd;
+    fila_str(s, sizeof s);
+    printf("[t=%6.2fs] PIX #%-3d chegou                       fila: %s\n", agora_s(), r.id, s);
+    pthread_cond_signal(&nao_vazia);         
+    pthread_mutex_unlock(&mutex_fila);
+}
+ 
+/* CONSUMIDOR: retira da CABECA da fila; devolve id=0 se acabou o expediente */
+static Req retirar(int w)
+{
+    char s[160];
+    Req r = { 0, 0, 0 };
+    pthread_mutex_lock(&mutex_fila);
+    while (fila.qtd == 0 && !encerrar)
+        pthread_cond_wait(&nao_vazia, &mutex_fila);   
+    if (fila.qtd == 0) {                              
+        pthread_mutex_unlock(&mutex_fila);
+        return r;
+    }
+    r = fila.dados[fila.ini];
+    fila.ini = (fila.ini + 1) % TAM_FILA;
+    fila.qtd--;
+    t_ordem[r.id - 1]  = ++seq_saida;
+    t_inicio[r.id - 1] = agora_s();
+    t_worker[r.id - 1] = w;
+    fila_str(s, sizeof s);
+    printf("[t=%6.2fs] worker %d iniciou PIX #%-3d (esperou %.2fs)  fila: %s\n",
+           t_inicio[r.id - 1], w, r.id, t_inicio[r.id - 1] - t_chegada[r.id - 1], s);
+    pthread_cond_signal(&nao_cheia);
+    pthread_mutex_unlock(&mutex_fila);
+    return r;
+}
+ 
+/* transferencia com protecao minima: o mutex cobre debito e credito */
+static void transferir_fcfs(const Req *r)
+{
+    pthread_mutex_lock(&mutex_central);
+    usuarios[r->origem] -= r->valor;
+    long tmp = saldo_central;        
+    trabalho_na_secao();
+    tmp = tmp + r->valor;           
+    saldo_central = tmp;             
+    pthread_mutex_unlock(&mutex_central);
+}
+ 
+/* WORKER da thread pool: fica dormindo ate haver requisicao na fila */
+static void *worker_fcfs(void *arg)
+{
+    int w = (int)(intptr_t)arg;                  
+    for (;;) {
+        Req r = retirar(w);                      
+        if (r.id == 0) break;                    
+ 
+        em_atendimento[w - 1] = r.id;
+        usleep((useconds_t)f_servico_ms * 1000); 
+        transferir_fcfs(&r);
+        t_fim[r.id - 1] = agora_s();
+        em_atendimento[w - 1] = 0;
+ 
+        printf("[t=%6.2fs] worker %d concluiu PIX #%d\n", t_fim[r.id - 1], w, r.id);
+    }
+    return NULL;
+}
+ 
+/* --fcfs P N [servico_ms] [chegada_ms] */
+static int modo_fcfs(int P, int N, long servico_ms, long chegada_ms)
+{
+    if (P < 1 || P > MAX_POOL || N < 1) {
+        fprintf(stderr, "Parametros invalidos (1 <= P <= %d, N >= 1).\n", MAX_POOL);
+        return 1;
+    }
+    f_pool = P;
+    f_servico_ms = servico_ms;
+ 
+    printf("\n=== PARTE 2: thread pool de %d workers + fila FCFS ===\n", P);
+    printf("  %d requisicoes (N:1 -> conta central) | servico=%ldms | chegada a cada %ldms | fila max=%d\n\n",
+           N, servico_ms, chegada_ms, TAM_FILA);
+ 
+    // estado inicial
+    saldo_central = 0;
+    for (int i = 0; i < NUM_USUARIOS; i++) usuarios[i] = SALDO_INICIAL;
+    fila.ini = fila.fim = fila.qtd = 0;
+    max_fila = 0; seq_saida = 0; encerrar = 0;
+    t_chegada = calloc((size_t)N, sizeof(double));
+    t_inicio  = calloc((size_t)N, sizeof(double));
+    t_fim     = calloc((size_t)N, sizeof(double));
+    t_worker  = calloc((size_t)N, sizeof(int));
+    t_ordem   = calloc((size_t)N, sizeof(int));
+    em_atendimento = calloc((size_t)P, sizeof(int));
+ 
+ 
+    t0 = 0; t0 = agora_s();
+ 
+    // cria a thread pool (tamanho fixo P)
+    pthread_t tids[MAX_POOL];
+    for (int w = 1; w <= P; w++)
+        pthread_create(&tids[w - 1], NULL, worker_fcfs, (void *)(intptr_t)w);
+ 
+    // N usuarios enviam PIX: as requisicoes chegam em ordem 1, 2, ..., N
+    for (int i = 1; i <= N; i++) {
+        Req r = { i, i % NUM_USUARIOS, VALOR_ENVIO };
+        t_chegada[i - 1] = agora_s();
+        enfileirar(r);
+        usleep((useconds_t)chegada_ms * 1000);
+    }
+ 
+    pthread_mutex_lock(&mutex_fila);                      
+    encerrar = 1;
+    pthread_cond_broadcast(&nao_vazia);                
+    pthread_mutex_unlock(&mutex_fila);
+    for (int w = 0; w < P; w++) pthread_join(tids[w], NULL);  
+ 
+    /* ---------- relatorio do escalonamento ---------- */
+    double soma_espera = 0, max_espera = 0;
+    int fcfs_ok = 1;
+    for (int i = 0; i < N; i++) {
+        double e = t_inicio[i] - t_chegada[i];
+        soma_espera += e;
+        if (e > max_espera) max_espera = e;
+        if (t_ordem[i] != i + 1) fcfs_ok = 0;
+    }
+ 
+    if (N <= 40) {
+        printf("\n  PIX | chegada | inicio |   fim  | espera | worker | ordem de saida da fila\n");
+        printf("  ----+---------+--------+--------+--------+--------+-----------------------\n");
+        for (int i = 0; i < N; i++)
+            printf("  #%-2d | %7.2f | %6.2f | %6.2f | %6.2f | %6d | %d\n", i + 1, t_chegada[i],
+                   t_inicio[i], t_fim[i], t_inicio[i] - t_chegada[i], t_worker[i], t_ordem[i]);
+    }
+    printf("\n  Espera media na fila: %.2fs | espera maxima: %.2fs | fila maxima: %d\n",
+           soma_espera / N, max_espera, max_fila);
+    printf("  Ordem de atendimento == ordem de chegada (FCFS)? %s\n",
+           fcfs_ok ? "SIM" : "NAO");
+ 
+    /* ---------- conferencia da protecao ---------- */
+    long soma_usuarios = 0;
+    for (int i = 0; i < NUM_USUARIOS; i++) soma_usuarios += usuarios[i];
+    long esperado = (long)N * VALOR_ENVIO;
+    long total_antes = (long)NUM_USUARIOS * SALDO_INICIAL;
+    long total_depois = saldo_central + soma_usuarios;
+    printf("  Saldo central ESPERADO: %ld | OBTIDO: %ld | total antes: %ld | depois: %ld\n",
+           esperado, saldo_central, total_antes, total_depois);
+    printf(saldo_central == esperado && total_antes == total_depois
+           ? "  => OK: nenhuma atualizacao perdida, total conservado.\n"
+           : "  => ERRO: inconsistencia detectada!\n");
+ 
+    free(t_chegada); free(t_inicio); free(t_fim);
+    free(t_worker); free(t_ordem); free(em_atendimento);
+    return !(fcfs_ok && saldo_central == esperado && total_antes == total_depois);
+}
+
 /* ===================== main ===================== */
 
 static void uso(const char *prog)
@@ -242,7 +454,8 @@ static void uso(const char *prog)
     printf("  %s --sem-mutex  N     (P1) N envios SEM protecao\n", prog);
     printf("  %s --com-mutex  N     (P1) N envios COM mutex\n", prog);
     printf("  %s --demo             (P1) varre N e mede a corrida\n", prog);
-    printf("  %s --fcfs  P N        (P2) pool de P workers + fila FCFS (em breve)\n", prog);
+     printf("  %s --fcfs P N [servico_ms=200] [chegada_ms=50]\n", prog);
+    printf("                        (P2) pool de P workers + fila FCFS\n");
     printf("  %s                    (P3) sistema completo + debug por sinais (em breve)\n", prog);
 }
 
@@ -254,7 +467,11 @@ int main(int argc, char **argv)
     if (argc >= 2 && strcmp(argv[1], "--demo") == 0)          { modo_demo();          return 0; }
     if (argc >= 3 && strcmp(argv[1], "--sem-mutex") == 0)     { modo_rodada_unica(atoi(argv[2]), 0); return 0; }
     if (argc >= 3 && strcmp(argv[1], "--com-mutex") == 0)     { modo_rodada_unica(atoi(argv[2]), 1); return 0; }
-
+    if (argc >= 4 && strcmp(argv[1], "--fcfs") == 0) {
+        long servico = argc > 4 ? atol(argv[4]) : 200;
+        long chegada = argc > 5 ? atol(argv[5]) : 50;
+        return modo_fcfs(atoi(argv[2]), atoi(argv[3]), servico, chegada);
+    }
     uso(argv[0]);
     return 0;
 }
