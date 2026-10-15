@@ -25,11 +25,13 @@ Curso: **Ciência da Computação** — Universidade Federal de Goiás (UFG).
 Cada solução é acompanhada de um link com uma vídeo-resposta explicativa de até 5 minutos.
 Cada integrante participa de, no mínimo, uma gravação.
 
+Os vídeos das três partes serão disponibilizados na mesma pasta do Google Drive.
+
 | Parte | Responsável pela gravação | Link |
 |-------|---------------------------|------|
-| Parte 1 — Sincronismo (5.0 pts) | _a definir_ | _(adicionar link)_ |
-| Parte 2 — Escalonador FCFS (3.0 pts) | _a definir_ | _(adicionar link)_ |
-| Parte 3 — Debugging por sinais (2.0 pts) | _a definir_ | _(adicionar link)_ |
+| Parte 1 — Sincronismo (5.0 pts) | _a definir_ | [Pasta dos vídeos](https://drive.google.com/drive/folders/1WV_QEWTirhLf5BPLZhgmL7PTXy9ZVEdt?usp=sharing) |
+| Parte 2 — Escalonador FCFS (3.0 pts) | _a definir_ | [Pasta dos vídeos](https://drive.google.com/drive/folders/1WV_QEWTirhLf5BPLZhgmL7PTXy9ZVEdt?usp=sharing) |
+| Parte 3 — Debugging por sinais (2.0 pts) | Alan Queiroz Dantas de Oliveira | [Pasta dos vídeos](https://drive.google.com/drive/folders/1WV_QEWTirhLf5BPLZhgmL7PTXy9ZVEdt?usp=sharing) |
 
 ---
 
